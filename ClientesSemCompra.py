@@ -68,7 +68,7 @@ def get_fornecedores(_conn):
     query = """
     SELECT DISTINCT nome_fornecedor 
     FROM mercadorias 
-    WHERE fornecedor IN (10263, 11588, 11585, 11392) 
+    WHERE fornecedor IN (11588) 
     ORDER BY nome_fornecedor
     """
     try:
@@ -169,7 +169,7 @@ def main():
         col_f1, col_f2, col_f3, col_f4 = st.columns(4)
         
         with col_f1:
-            meses_sem_compra = st.number_input("Meses sem compra (mínimo)", min_value=1, value=3, step=1)
+            meses_sem_compra = st.number_input("Meses sem compra (mínimo)", min_value=0, value=3, step=1)
             
         with col_f2:
             fornecedores_lista = get_fornecedores(conn)
@@ -224,7 +224,7 @@ def main():
                     "raz_social": "Razão Social",
                     "cidade": "Cidade",
                     "ultimo_vendedor_cod": st.column_config.NumberColumn("Cód. Vend.", format="%d"),
-                    "nome_vendedor": "Vendedor",
+                    "nome_vendedor": "Último vendedor",
                     "situacao": "Situação",
                     "antecipado": "Antecipado",
                     "limite": "Limite",
