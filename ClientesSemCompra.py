@@ -173,7 +173,7 @@ def main():
             
         with col_f2:
             fornecedores_lista = get_fornecedores(conn)
-            fornecedores_sel = st.multiselect("Fornecedor", ['Todos'] + fornecedores_lista, default=['Todos'])
+            fornecedores_sel = st.multiselect("Fornecedor", ['Todos'] + fornecedores_lista, default=fornecedores_lista)
             if 'Todos' in fornecedores_sel: fornecedores_sel = ['Todos']
             
         with col_f3:
