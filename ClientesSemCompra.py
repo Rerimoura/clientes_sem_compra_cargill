@@ -82,7 +82,8 @@ def get_fornecedores(_conn):
 
 @st.cache_data(ttl=3600)
 def get_cidades(_conn):
-    query = "SELECT DISTINCT cidade FROM clientes WHERE cidade IS NOT NULL ORDER BY cidade"
+    # query = "SELECT DISTINCT cidade FROM clientes WHERE cidade IS NOT NULL ORDER BY cidade"
+    query = "SELECT c.cidade, SUM(REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''),'.', ''),',', '.')::NUMERIC) AS vv FROM clientes c INNER JOIN vendas v ON v.cliente = c.cliente WHERE c.cidade IS NOT NULL AND UF = 'MG' GROUP BY c.cidade ORDER BY c.cidade"
     try:
         df = pd.read_sql(query, _conn)
         return df['cidade'].tolist()
@@ -139,10 +140,10 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
         CASE
             WHEN c.situacao = 'S' THEN 'Suspenso'
             WHEN c.antecipado = 'A28' THEN 'Antecipado'
-            WHEN c.limite_aberto = '0' THEN 'Suspenso'
+            WHEN c.limite_aberto = 0 THEN 'Suspenso'
             ELSE 'Liberado'
         END AS situacao,
-        CAST(REPLACE(REGEXP_REPLACE(c.limite_aberto, '[^0-9,]', '', 'g'), ',', '.') AS NUMERIC) as limite,
+        c.limite_aberto as limite,
         uv.data_ultima_compra,
         (EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM uv.data_ultima_compra)) * 12 + 
         (EXTRACT(MONTH FROM CURRENT_DATE) - EXTRACT(MONTH FROM uv.data_ultima_compra)) AS meses_sem_compra
@@ -240,7 +241,8 @@ def main():
             
         with col_f1:
             fornecedores_lista = get_fornecedores(conn)
-            fornecedores_sel = st.multiselect("Fornecedor", fornecedores_lista, default=fornecedores_lista)
+            fornecedores_sel = st.multiselect("Fornecedor", ['Todos'] + fornecedores_lista, default=['Todos'])
+            if 'Todos' in fornecedores_sel: fornecedores_sel = ['Todos']
             
         with col_f2:
             cidades_lista = get_cidades(conn)
