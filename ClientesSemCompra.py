@@ -66,7 +66,7 @@ def get_vendedores(_conn):
 
 @st.cache_data(ttl=3600)
 def get_fornecedores(_conn):
-    # IDs solicitados: 11588
+    # IDs solicitados: 10263, 11588, 11585, 11392
     query = """
     SELECT DISTINCT nome_fornecedor 
     FROM mercadorias 
@@ -120,14 +120,14 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
     WITH ultimas_vendas AS (
         SELECT 
             v.cliente,
-            MAX(v.data_emissao) as data_ultima_compra,
-            (SELECT v2.vendedor FROM vendas v2 WHERE v2.cliente = v.cliente AND v2.data_emissao = MAX(v.data_emissao) LIMIT 1) as ultimo_vendedor_cod
+            v.data_emissao as data_ultima_compra,
+            v.vendedor as ultimo_vendedor_cod,
+            ROW_NUMBER() OVER (PARTITION BY v.cliente ORDER BY v.data_emissao DESC) as rn
         FROM vendas v
         JOIN mercadorias m ON v.mercadoria = m.mercadoria
         WHERE v.vendedor != '2'
         {filtro_vendedor_vendas}
         {filtro_fornecedor}
-        GROUP BY v.cliente
     )
     SELECT 
         c.cliente::int as cliente,
@@ -135,6 +135,7 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
         c.cidade,
         uv.ultimo_vendedor_cod::int as ultimo_vendedor_cod,
         ven.nome as nome_vendedor,
+        ven.data_desligamento,
         CASE
             WHEN c.situacao = 'S' THEN 'Suspenso'
             WHEN c.antecipado = 'A28' THEN 'Antecipado'
@@ -148,7 +149,8 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
     FROM ultimas_vendas uv
     JOIN clientes c ON uv.cliente = c.cliente
     LEFT JOIN vendedores ven ON uv.ultimo_vendedor_cod::text = ven.vendedor::text
-    WHERE ((EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM uv.data_ultima_compra)) * 12 + 
+    WHERE uv.rn = 1
+    AND ((EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM uv.data_ultima_compra)) * 12 + 
            (EXTRACT(MONTH FROM CURRENT_DATE) - EXTRACT(MONTH FROM uv.data_ultima_compra))) >= {meses_sem_compra}
     {filtro_cidade}
     ORDER BY meses_sem_compra DESC
@@ -157,6 +159,65 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
         return pd.read_sql(query, _conn)
     except Exception as e:
         st.error(f"Erro ao buscar clientes sem compra: {e}")
+        return pd.DataFrame()
+@st.cache_data(ttl=600)
+def get_evolucao_clientes(_conn, fornecedores_sel, cidades_sel, vendedores_sel):
+    """
+    Busca a quantidade de clientes atendidos (com compras) por mês no último ano.
+    """
+    filtro_vendedor_vendas = ""
+    filtro_cidade = ""
+    filtro_fornecedor = ""
+    
+    # Filtros de Vendedor
+    if 'Todos' not in vendedores_sel and vendedores_sel:
+        lista_vendedores = "', '".join(vendedores_sel)
+        filtro_vendedor_vendas = f"AND v.vendedor IN ('{lista_vendedores}')"
+    
+    # Filtros de Cidade
+    if 'Todas' not in cidades_sel and cidades_sel:
+        lista_cidades = "', '".join(cidades_sel)
+        filtro_cidade = f"AND c.cidade IN ('{lista_cidades}')"
+        
+    # Filtros de Fornecedor (na tabela mercadorias)
+    if 'Todos' not in fornecedores_sel and fornecedores_sel:
+        lista_fornecedores = "', '".join(fornecedores_sel)
+        filtro_fornecedor = f"AND m.nome_fornecedor IN ('{lista_fornecedores}')"
+
+    query = f"""
+    WITH vendas_por_cliente AS (
+        SELECT
+            DATE_TRUNC('month', v.data_emissao) as mes_ref,
+            v.cliente,
+            SUM(CASE 
+                WHEN v.tipo = 'V' THEN 
+                    REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''), '.', ''), ',', '.')::NUMERIC
+                WHEN v.tipo = 'D' THEN 
+                    -REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''), '.', ''), ',', '.')::NUMERIC
+                ELSE 0
+            END) as total_venda
+        FROM vendas v
+        JOIN mercadorias m ON v.mercadoria = m.mercadoria
+        JOIN clientes c ON v.cliente = c.cliente
+        WHERE v.data_emissao >= DATE_TRUNC('year', CURRENT_DATE - INTERVAL '1 year')
+        AND v.vendedor != '2'
+        {filtro_vendedor_vendas}
+        {filtro_fornecedor}
+        {filtro_cidade}
+        GROUP BY DATE_TRUNC('month', v.data_emissao), v.cliente
+    )
+    SELECT
+        TO_CHAR(mes_ref, 'YYYY-MM-DD') as mes_ref,
+        COUNT(DISTINCT cliente) as qtd_clientes_total,
+        COUNT(DISTINCT CASE WHEN total_venda > 0 THEN cliente END) as qtd_clientes_com_venda
+    FROM vendas_por_cliente
+    GROUP BY mes_ref
+    ORDER BY mes_ref;
+    """
+    try:
+        return pd.read_sql(query, _conn)
+    except Exception as e:
+        st.error(f"Erro ao buscar evolução de clientes: {e}")
         return pd.DataFrame()
 
 def main():
@@ -172,21 +233,21 @@ def main():
     vendedor_opcoes = ['Todos'] + list(vendedores_dict.values())
 
     with st.container():
-        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        col_f1, col_f2, col_f3 = st.columns(3)
         
-        with col_f1:
-            meses_sem_compra = st.number_input("Meses sem compra (mínimo)", min_value=0, value=3, step=1)
+        # meses_sem_compra fixo em 0 conforme solicitado
+        meses_sem_compra = 0
             
-        with col_f2:
+        with col_f1:
             fornecedores_lista = get_fornecedores(conn)
             fornecedores_sel = st.multiselect("Fornecedor", fornecedores_lista, default=fornecedores_lista)
             
-        with col_f3:
+        with col_f2:
             cidades_lista = get_cidades(conn)
             cidades_sel = st.multiselect("Cidade", ['Todas'] + cidades_lista, default=['Todas'])
             if 'Todas' in cidades_sel: cidades_sel = ['Todas']
             
-        with col_f4:
+        with col_f3:
             vendedores_sel_report = st.multiselect("Vendedor", vendedor_opcoes, default=['Todos'])
             
             if 'Todos' in vendedores_sel_report:
@@ -196,12 +257,85 @@ def main():
                 vendedores_cod_report = [nome_para_codigo[nome] for nome in vendedores_sel_report if nome in nome_para_codigo]
 
     if st.button("Gerar Relatório", type="primary"):
-        with st.spinner("Buscando clientes..."):
+        with st.spinner("Buscando dados..."):
             df_sem_compra = get_clientes_sem_compra(conn, meses_sem_compra, fornecedores_sel, cidades_sel, vendedores_cod_report)
+            df_evolucao = get_evolucao_clientes(conn, fornecedores_sel, cidades_sel, vendedores_cod_report)
             
         if not df_sem_compra.empty:
-            st.success(f"Encontrados {len(df_sem_compra)} clientes.")
+            st.success(f"Encontrados {len(df_sem_compra)} clientes sem compra.")
             
+            # Gráfico de Evolução de Clientes Atendidos
+            if not df_evolucao.empty:
+                # Formatar mês para exibição (jan-25, etc)
+                df_evolucao['mes_dt'] = pd.to_datetime(df_evolucao['mes_ref'])
+                
+                # Separar dados por ano
+                ano_atual = datetime.now().year
+                df_ano_atual = df_evolucao[df_evolucao['mes_dt'].dt.year == ano_atual].copy()
+                df_ano_anterior = df_evolucao[df_evolucao['mes_dt'].dt.year == (ano_atual - 1)].copy()
+                
+                # Mapeamento de meses para PT-BR
+                meses_pt = {1: 'jan', 2: 'fev', 3: 'mar', 4: 'abr', 5: 'mai', 6: 'jun', 
+                           7: 'jul', 8: 'ago', 9: 'set', 10: 'out', 11: 'nov', 12: 'dez'}
+                
+                # --- Gráfico Ano Anterior ---
+                if not df_ano_anterior.empty:
+                    df_ano_anterior['mes_label'] = df_ano_anterior['mes_dt'].apply(lambda x: f"{meses_pt[x.month]}-{str(x.year)[-2:]}")
+                    
+                    st.markdown("### 📉 Evolução de Clientes Atendidos (Ano Anterior)")
+                    fig_ev_ant = go.Figure()
+                    fig_ev_ant.add_trace(go.Scatter(
+                        x=df_ano_anterior['mes_label'],
+                        y=df_ano_anterior['qtd_clientes_com_venda'],
+                        mode='lines+markers+text',
+                        text=df_ano_anterior['qtd_clientes_com_venda'],
+                        textposition="top center",
+                        line=dict(color='gray', width=3, dash='dot'),
+                        marker=dict(size=8)
+                    ))
+                    
+                    fig_ev_ant.update_layout(
+                        title=f"Quantidade de Clientes Atendidos por Mês ({ano_atual - 1})",
+                        xaxis_title="Mês",
+                        yaxis_title="Clientes Atendidos",
+                        height=400,
+                        showlegend=False,
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        yaxis=dict(showgrid=True, gridcolor='lightgray'),
+                        xaxis=dict(showgrid=False)
+                    )
+                    st.plotly_chart(fig_ev_ant, use_container_width=True)
+                    st.markdown("---")
+
+                # --- Gráfico Ano Atual ---
+                if not df_ano_atual.empty:
+                    df_ano_atual['mes_label'] = df_ano_atual['mes_dt'].apply(lambda x: f"{meses_pt[x.month]}-{str(x.year)[-2:]}")
+                    
+                    st.markdown("### 📈 Evolução de Clientes Atendidos (Ano Atual)")
+                    fig_ev = go.Figure()
+                    fig_ev.add_trace(go.Scatter(
+                        x=df_ano_atual['mes_label'],
+                        y=df_ano_atual['qtd_clientes_com_venda'],
+                        mode='lines+markers+text',
+                        text=df_ano_atual['qtd_clientes_com_venda'],
+                        textposition="top center",
+                        line=dict(color='royalblue', width=3),
+                        marker=dict(size=8)
+                    ))
+                    
+                    fig_ev.update_layout(
+                        title=f"Quantidade de Clientes Atendidos por Mês ({ano_atual})",
+                        xaxis_title="Mês",
+                        yaxis_title="Clientes Atendidos",
+                        height=400,
+                        showlegend=False,
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        yaxis=dict(showgrid=True, gridcolor='lightgray'),
+                        xaxis=dict(showgrid=False)
+                    )
+                    st.plotly_chart(fig_ev, use_container_width=True)
+                    st.markdown("---")
+
             # Gráfico de Barras - Distribuição por Meses sem Compra
             st.markdown("### 📊 Distribuição de Clientes por Meses sem Compra")
             
@@ -286,6 +420,118 @@ def main():
                 pivot_situacao.style.apply(color_columns, axis=0)
                                     .format("{:,.0f}"),
                 use_container_width=True
+            )
+            
+            # Botão de Exportação - Distribuição por Situação
+            import io
+            buffer_situacao = io.BytesIO()
+            with pd.ExcelWriter(buffer_situacao, engine='xlsxwriter') as writer:
+                pivot_situacao.to_excel(writer, sheet_name='Distribuição por Situação')
+            
+            st.download_button(
+                label="📥 Exportar Distribuição por Situação",
+                data=buffer_situacao.getvalue(),
+                file_name=f"distribuicao_situacao_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel",
+                key="export_situacao"
+            )
+            
+            st.markdown("---")
+            
+            # Tabela de Distribuição por Vendedor
+            st.markdown("### 👨‍💼 Distribuição por Vendedor")
+            
+            # Adicionar coluna de status ao dataframe
+            df_sem_compra['status_vendedor'] = df_sem_compra['data_desligamento'].apply(
+                lambda x: 'Vendedor Desligado' if pd.notnull(x) else 'Vendedor Ativo'
+            )
+            
+            # Criar nome completo com status
+            df_sem_compra['vendedor_completo'] = df_sem_compra['nome_vendedor'] + ' (' + df_sem_compra['status_vendedor'] + ')'
+            
+            # Criar tabela pivot com vendedor x meses
+            tabela_vendedor = df_sem_compra.groupby(['vendedor_completo', 'meses_sem_compra']).size().reset_index(name='quantidade')
+            pivot_vendedor = tabela_vendedor.pivot(index='vendedor_completo', columns='meses_sem_compra', values='quantidade').fillna(0).astype(int)
+            
+            # Adicionar totais
+            pivot_vendedor['Total'] = pivot_vendedor.sum(axis=1)
+            pivot_vendedor.loc['Total Geral'] = pivot_vendedor.sum()
+            
+            # Renomear colunas (meses)
+            pivot_vendedor.columns = [f"{int(col)} {'mês' if col == 1 else 'meses'}" if col != 'Total' else 'Total' 
+                                     for col in pivot_vendedor.columns]
+            
+            # Ordenar por Total (decrescente), mantendo Total Geral no final
+            if 'Total Geral' in pivot_vendedor.index:
+                total_row = pivot_vendedor.loc[['Total Geral']]
+                other_rows = pivot_vendedor.drop('Total Geral').sort_values('Total', ascending=False)
+                pivot_vendedor = pd.concat([other_rows, total_row])
+            
+            # Exibir tabela estilizada
+            st.dataframe(
+                pivot_vendedor.style.background_gradient(cmap='Reds', axis=1, subset=[col for col in pivot_vendedor.columns if col != 'Total'])
+                                    .format("{:,.0f}")
+                                    .applymap(lambda x: 'font-weight: bold', subset=['Total'])
+                                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1),
+                use_container_width=True
+            )
+            
+            # Botão de Exportação - Distribuição por Vendedor
+            buffer_vendedor = io.BytesIO()
+            with pd.ExcelWriter(buffer_vendedor, engine='xlsxwriter') as writer:
+                pivot_vendedor.to_excel(writer, sheet_name='Distribuição por Vendedor')
+            
+            st.download_button(
+                label="📥 Exportar Distribuição por Vendedor",
+                data=buffer_vendedor.getvalue(),
+                file_name=f"distribuicao_vendedor_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel",
+                key="export_vendedor"
+            )
+            
+            st.markdown("---")
+            
+            # Tabela de Distribuição por Cidade
+            st.markdown("### 🏙️ Distribuição por Cidade")
+            
+            # Criar tabela pivot com cidade x meses
+            tabela_cidade = df_sem_compra.groupby(['cidade', 'meses_sem_compra']).size().reset_index(name='quantidade')
+            pivot_cidade = tabela_cidade.pivot(index='cidade', columns='meses_sem_compra', values='quantidade').fillna(0).astype(int)
+            
+            # Adicionar totais
+            pivot_cidade['Total'] = pivot_cidade.sum(axis=1)
+            pivot_cidade.loc['Total Geral'] = pivot_cidade.sum()
+            
+            # Renomear colunas (meses)
+            pivot_cidade.columns = [f"{int(col)} {'mês' if col == 1 else 'meses'}" if col != 'Total' else 'Total' 
+                                   for col in pivot_cidade.columns]
+            
+            # Ordenar por Total (decrescente), mantendo Total Geral no final
+            if 'Total Geral' in pivot_cidade.index:
+                total_row = pivot_cidade.loc[['Total Geral']]
+                other_rows = pivot_cidade.drop('Total Geral').sort_values('Total', ascending=False)
+                pivot_cidade = pd.concat([other_rows, total_row])
+            
+            # Exibir tabela estilizada
+            st.dataframe(
+                pivot_cidade.style.background_gradient(cmap='Blues', axis=1, subset=[col for col in pivot_cidade.columns if col != 'Total'])
+                                    .format("{:,.0f}")
+                                    .applymap(lambda x: 'font-weight: bold', subset=['Total'])
+                                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1),
+                use_container_width=True
+            )
+            
+            # Botão de Exportação - Distribuição por Cidade
+            buffer_cidade = io.BytesIO()
+            with pd.ExcelWriter(buffer_cidade, engine='xlsxwriter') as writer:
+                pivot_cidade.to_excel(writer, sheet_name='Distribuição por Cidade')
+            
+            st.download_button(
+                label="📥 Exportar Distribuição por Cidade",
+                data=buffer_cidade.getvalue(),
+                file_name=f"distribuicao_cidade_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel",
+                key="export_cidade"
             )
             
             st.markdown("---")
