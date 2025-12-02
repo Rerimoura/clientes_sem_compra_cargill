@@ -49,9 +49,11 @@ def get_connection():
 @st.cache_data(ttl=3600)
 def get_vendedores(_conn):
     query = """
-    SELECT vendedor, nome 
-    FROM vendedores 
-    ORDER BY nome
+    SELECT DISTINCT ven.vendedor, ven.nome 
+    FROM vendedores ven
+    INNER JOIN vendas v ON v.vendedor::text = ven.vendedor::text
+    WHERE v.vendedor != '2'
+    ORDER BY ven.nome
     """
     try:
         df = pd.read_sql(query, _conn)
@@ -63,6 +65,7 @@ def get_vendedores(_conn):
     except Exception as e:
         st.error(f"Erro ao carregar vendedores: {e}")
         return {}
+
 
 @st.cache_data(ttl=3600)
 def get_fornecedores(_conn):
@@ -80,6 +83,7 @@ def get_fornecedores(_conn):
         st.error(f"Erro ao carregar fornecedores: {e}")
         return []
 
+
 @st.cache_data(ttl=3600)
 def get_cidades(_conn):
     # query = "SELECT DISTINCT cidade FROM clientes WHERE cidade IS NOT NULL ORDER BY cidade"
@@ -90,6 +94,22 @@ def get_cidades(_conn):
     except Exception as e:
         st.error(f"Erro ao carregar cidades: {e}")
         return []
+
+@st.cache_data(ttl=3600)
+def get_periodo_vendas(_conn):
+    """Retorna a data mínima e máxima da base de vendas"""
+    query = """
+    SELECT 
+        MIN(data_emissao) as data_inicial,
+        MAX(data_emissao) as data_final
+    FROM vendas
+    """
+    try:
+        df = pd.read_sql(query, _conn)
+        return df.iloc[0]['data_inicial'], df.iloc[0]['data_final']
+    except Exception as e:
+        st.error(f"Erro ao buscar período de vendas: {e}")
+        return None, None
 
 @st.cache_data(ttl=600)
 def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_sel, vendedores_sel):
@@ -156,11 +176,38 @@ def get_clientes_sem_compra(_conn, meses_sem_compra, fornecedores_sel, cidades_s
     {filtro_cidade}
     ORDER BY meses_sem_compra DESC
     """
-    try:
-        return pd.read_sql(query, _conn)
-    except Exception as e:
-        st.error(f"Erro ao buscar clientes sem compra: {e}")
-        return pd.DataFrame()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return pd.read_sql(query, _conn)
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Se for erro de SSL ou conexão, tentar reconectar
+            if 'ssl' in error_msg or 'connection' in error_msg or 'closed' in error_msg:
+                if attempt < max_retries - 1:
+                    st.warning(f"⚠️ Conexão perdida. Tentando reconectar... (Tentativa {attempt + 1}/{max_retries})")
+                    # Limpar cache e tentar novamente
+                    get_connection.clear()
+                    import time
+                    time.sleep(2)  # Aguardar 2 segundos antes de tentar novamente
+                    # Obter nova conexão
+                    try:
+                        _conn = get_connection()
+                        if not _conn:
+                            st.error("❌ Não foi possível reconectar ao banco de dados.")
+                            return pd.DataFrame()
+                    except:
+                        continue
+                else:
+                    st.error(f"❌ Erro ao buscar clientes sem compra após {max_retries} tentativas: {e}")
+                    st.info("💡 Tente novamente ou selecione menos filtros para reduzir o tempo de processamento.")
+                    return pd.DataFrame()
+            else:
+                st.error(f"Erro ao buscar clientes sem compra: {e}")
+                return pd.DataFrame()
+    
+    return pd.DataFrame()
+
 @st.cache_data(ttl=600)
 def get_evolucao_clientes(_conn, fornecedores_sel, cidades_sel, vendedores_sel):
     """
@@ -215,23 +262,66 @@ def get_evolucao_clientes(_conn, fornecedores_sel, cidades_sel, vendedores_sel):
     GROUP BY mes_ref
     ORDER BY mes_ref;
     """
-    try:
-        return pd.read_sql(query, _conn)
-    except Exception as e:
-        st.error(f"Erro ao buscar evolução de clientes: {e}")
-        return pd.DataFrame()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return pd.read_sql(query, _conn)
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'ssl' in error_msg or 'connection' in error_msg or 'closed' in error_msg:
+                if attempt < max_retries - 1:
+                    st.warning(f"⚠️ Conexão perdida ao buscar evolução. Tentando reconectar... (Tentativa {attempt + 1}/{max_retries})")
+                    get_connection.clear()
+                    import time
+                    time.sleep(2)
+                    try:
+                        _conn = get_connection()
+                        if not _conn:
+                            return pd.DataFrame()
+                    except:
+                        continue
+                else:
+                    st.error(f"❌ Erro ao buscar evolução de clientes após {max_retries} tentativas.")
+                    return pd.DataFrame()
+            else:
+                st.error(f"Erro ao buscar evolução de clientes: {e}")
+                return pd.DataFrame()
+    
+    return pd.DataFrame()
 
 def main():
-    st.title("💤 Clientes sem Compra")
+    st.title("🎯 Análise de oportunidades Clientes")
     st.markdown("---")
 
     conn = get_connection()
     if not conn:
         return
 
+    # Buscar período de dados
+    data_inicial, data_final = get_periodo_vendas(conn)
+    
+    # Card informativo sobre a base de dados
+    if data_inicial and data_final:
+        st.info(f"""
+        📊 **Informações sobre a Base de Dados**
+        
+        Este aplicativo analisa **apenas pedidos faturados** da equipe externa, televendas e supervisores.
+        
+        **Período disponível na base:** {data_inicial.strftime('%d/%m/%Y')} até {data_final.strftime('%d/%m/%Y')}, a atualização de dados ocorre as 8:00
+        
+        ℹ️ Pedidos em aberto ou não faturados não são considerados nesta análise.
+
+        💡💡 Caso selecione algum filtro abaixo, desmarque a opção "Todos", para que o filtro seja aplicado.
+
+        ⚠️⚠️ Observação: O vendedor exibido nas análises é o último vendedor que atendeu ao cliente, não o vendedor atual.
+        """)
+    
+    st.markdown("---")
+
     # Carregar dados auxiliares
     vendedores_dict = get_vendedores(conn)
     vendedor_opcoes = ['Todos'] + list(vendedores_dict.values())
+
 
     with st.container():
         col_f1, col_f2, col_f3 = st.columns(3)
@@ -264,7 +354,7 @@ def main():
             df_evolucao = get_evolucao_clientes(conn, fornecedores_sel, cidades_sel, vendedores_cod_report)
             
         if not df_sem_compra.empty:
-            st.success(f"Encontrados {len(df_sem_compra)} clientes sem compra.")
+            st.success(f"Encontrados {len(df_sem_compra)} clientes na base de dados.")
             
             # Gráfico de Evolução de Clientes Atendidos
             if not df_evolucao.empty:
@@ -538,18 +628,10 @@ def main():
             
             st.markdown("---")
             
-            # Botão de Exportação
-            import io
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_sem_compra.to_excel(writer, index=False, sheet_name='Clientes Sem Compra')
+            st.markdown("---")
             
-            st.download_button(
-                label="📥 Exportar para Excel",
-                data=buffer.getvalue(),
-                file_name=f"clientes_sem_compra_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.ms-excel"
-            )
+            # Tabela Detalhada de Clientes
+            st.markdown("### � Detalhamento Completo dos Clientes")
             
             st.dataframe(
                 df_sem_compra.style.format({
@@ -573,11 +655,59 @@ def main():
                     "meses_sem_compra": "Meses s/ Compra"
                 }
             )
+            
+            # Botão de Exportação - Tabela Completa
+            import io
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                df_sem_compra.to_excel(writer, index=False, sheet_name='Clientes Sem Compra')
+            
+            st.download_button(
+                label="📥 Exportar Tabela Completa para Excel",
+                data=buffer.getvalue(),
+                file_name=f"clientes_sem_compra_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+            
         else:
             st.info("Nenhum cliente encontrado com os critérios selecionados.")
 
     st.markdown("---")
     st.caption("📌 Utilize os filtros acima para refinar sua busca.")
+    
+    # Botão de contato via WhatsApp
+    st.markdown("---")
+    whatsapp_number = "5534992182544"  # Formato: código do país + DDD + número
+    whatsapp_message = "Olá! Tenho uma dúvida sobre o relatório de Clientes sem Compra."
+    whatsapp_url = f"https://wa.me/{whatsapp_number}?text={whatsapp_message.replace(' ', '%20')}"
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown(f"""
+        <div style="text-align: center;">
+            <a href="{whatsapp_url}" target="_blank">
+                <button style="
+                    background-color: #25D366;
+                    color: white;
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 16px;
+                    font-weight: bold;
+                    cursor: pointer;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                ">
+                    <span style="font-size: 20px;">💬</span>
+                    Contato via WhatsApp
+                </button>
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<p style='text-align: center; color: gray; font-size: 12px; margin-top: 10px;'>📱 +55 (34) 99218-2544</p>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
