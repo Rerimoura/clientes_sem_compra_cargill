@@ -331,8 +331,7 @@ def main():
             
         with col_f1:
             fornecedores_lista = get_fornecedores(conn)
-            fornecedores_sel = st.multiselect("Fornecedor", ['Todos'] + fornecedores_lista, default=['Todos'])
-            if 'Todos' in fornecedores_sel: fornecedores_sel = ['Todos']
+            fornecedores_sel = st.multiselect("Fornecedor", fornecedores_lista, default=fornecedores_lista)
             
         with col_f2:
             cidades_lista = get_cidades(conn)
