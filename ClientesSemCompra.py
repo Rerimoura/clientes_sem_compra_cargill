@@ -559,13 +559,13 @@ def main():
                 pivot_vendedor = pd.concat([other_rows, total_row])
             
             # Exibir tabela estilizada
-            st.dataframe(
-                pivot_vendedor.style.background_gradient(cmap='Reds', axis=1, subset=[col for col in pivot_vendedor.columns if col != 'Total'])
-                                    .format("{:,.0f}")
-                                    .applymap(lambda x: 'font-weight: bold', subset=['Total'])
-                                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1),
-                use_container_width=True
+            styled_vendedor = (
+                pivot_vendedor.style
+                    .background_gradient(cmap='Reds', axis=1, subset=[col for col in pivot_vendedor.columns if col != 'Total'])
+                    .format("{:,.0f}")
+                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1)
             )
+            st.dataframe(styled_vendedor, use_container_width=True)
             
             # Botão de Exportação - Distribuição por Vendedor
             buffer_vendedor = io.BytesIO()
@@ -604,13 +604,13 @@ def main():
                 pivot_cidade = pd.concat([other_rows, total_row])
             
             # Exibir tabela estilizada
-            st.dataframe(
-                pivot_cidade.style.background_gradient(cmap='Blues', axis=1, subset=[col for col in pivot_cidade.columns if col != 'Total'])
-                                    .format("{:,.0f}")
-                                    .applymap(lambda x: 'font-weight: bold', subset=['Total'])
-                                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1),
-                use_container_width=True
+            styled_cidade = (
+                pivot_cidade.style
+                    .background_gradient(cmap='Blues', axis=1, subset=[col for col in pivot_cidade.columns if col != 'Total'])
+                    .format("{:,.0f}")
+                    .apply(lambda x: ['font-weight: bold' if x.name == 'Total Geral' else '' for _ in x], axis=1)
             )
+            st.dataframe(styled_cidade, use_container_width=True)
             
             # Botão de Exportação - Distribuição por Cidade
             buffer_cidade = io.BytesIO()
