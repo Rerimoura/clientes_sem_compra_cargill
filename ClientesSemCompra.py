@@ -87,7 +87,7 @@ def get_fornecedores(_conn):
 @st.cache_data(ttl=3600)
 def get_cidades(_conn):
     # query = "SELECT DISTINCT cidade FROM clientes WHERE cidade IS NOT NULL ORDER BY cidade"
-    query = "SELECT c.cidade, SUM(REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''),'.', ''),',', '.')::NUMERIC) AS vv FROM clientes c INNER JOIN vendas v ON v.cliente = c.cliente WHERE c.cidade IS NOT NULL AND UF = 'MG' GROUP BY c.cidade ORDER BY c.cidade"
+    query = "SELECT c.cidade, SUM(v.valor_liq::numeric) AS vv FROM clientes c INNER JOIN vendas v ON v.cliente = c.cliente WHERE c.cidade IS NOT NULL AND UF = 'MG' GROUP BY c.cidade ORDER BY c.cidade"
     try:
         df = pd.read_sql(query, _conn)
         return df['cidade'].tolist()
@@ -239,9 +239,9 @@ def get_evolucao_clientes(_conn, fornecedores_sel, cidades_sel, vendedores_sel):
             v.cliente,
             SUM(CASE 
                 WHEN v.tipo = 'V' THEN 
-                    REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''), '.', ''), ',', '.')::NUMERIC
+                    v.valor_liq::numeric
                 WHEN v.tipo = 'D' THEN 
-                    -REPLACE(REPLACE(REPLACE(v.valor_liq, 'R$ ', ''), '.', ''), ',', '.')::NUMERIC
+                    -v.valor_liq::numeric
                 ELSE 0
             END) as total_venda
         FROM vendas v
